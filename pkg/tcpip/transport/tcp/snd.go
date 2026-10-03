@@ -1075,7 +1075,13 @@ func (s *sender) postXmit(dataSent bool, shouldScheduleProbe bool) {
 		// Enable timers if we have pending data.
 		if shouldScheduleProbe && s.shouldSchedulePTO() {
 			// Schedule PTO after transmitting new data that wasn't itself a TLP probe.
-			s.schedulePTO()
+			// A duplicate ACK or reverse-direction payload can call sendData
+			// without transmitting anything. It must not move the existing
+			// probe deadline, or continuous reverse traffic starves both PTO
+			// and the RTO which schedulePTO replaces.
+			if dataSent {
+				s.schedulePTO()
+			}
 		} else if !s.resendTimer.enabled() {
 			s.probeTimer.disable()
 			if s.Outstanding > 0 {
