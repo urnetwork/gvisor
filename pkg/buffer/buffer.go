@@ -506,6 +506,10 @@ func (b *Buffer) WriteFromReaderAndLimitedReader(r io.Reader, count int64, lr *i
 	if lr == nil {
 		lr = &io.LimitedReader{}
 	}
+	// A reusable limiter must not retain the source between calls.
+	defer func() {
+		lr.R = nil
+	}()
 
 	var done int64
 	for done < count {
