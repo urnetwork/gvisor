@@ -90,6 +90,10 @@ type segment struct {
 
 	// lost indicates if the segment is marked as lost by RACK.
 	lost bool
+
+	// lossEpoch is the RACK congestion-response epoch of the latest send.
+	// An unsent split remainder preserves the original transmission's epoch.
+	lossEpoch uint32
 }
 
 func newIncomingSegment(id stack.TransportEndpointID, clock tcpip.Clock, pkt *stack.PacketBuffer) (*segment, error) {
@@ -161,6 +165,7 @@ func (s *segment) clone() *segment {
 	t.rcvdTime = s.rcvdTime
 	t.xmitTime = s.xmitTime
 	t.xmitCount = s.xmitCount
+	t.lossEpoch = s.lossEpoch
 	t.ep = s.ep
 	t.qFlags = s.qFlags
 	t.dataMemSize = s.dataMemSize

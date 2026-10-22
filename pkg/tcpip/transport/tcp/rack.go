@@ -66,6 +66,10 @@ type rackControl struct {
 
 	// snd is a reference to the sender.
 	snd *sender
+
+	// lossEpoch identifies transmissions made after the latest congestion
+	// response. It is independent of sequence space and timestamp precision.
+	lossEpoch uint32
 }
 
 // init initializes RACK specific fields.
@@ -73,6 +77,53 @@ func (rc *rackControl) init(snd *sender, iss seqnum.Value) {
 	rc.FACK = iss
 	rc.ReoWndIncr = 1
 	rc.snd = snd
+}
+
+// advanceLossEpoch separates sends made after a congestion response from
+// all still-retained older flight. On wrap, relabel every retained entry as
+// old before reusing epoch1, so an ancient stamp cannot alias the new epoch.
+//
+// +checklocks:rc.snd.ep.mu
+func (rc *rackControl) advanceLossEpoch() {
+	rc.lossEpoch++
+	if rc.lossEpoch != 0 {
+		return
+	}
+	for seg := rc.snd.writeList.Front(); seg != nil; seg = seg.Next() {
+		seg.lossEpoch = 0
+	}
+	rc.lossEpoch = 1
+}
+
+// handleLoss shares the ACK and reorder-timer congestion response. Repeated
+// reports of an already-lost entry, or newly lost flight from before the last
+// response, must not cut again. A newly lost current-epoch transmission needs
+// another real response, even while the original recovery remains active.
+//
+// +checklocks:rc.snd.ep.mu
+func (rc *rackControl) handleLoss(numLost int, currentEpochLost bool) bool {
+	if numLost == 0 {
+		return false
+	}
+	snd := rc.snd
+	if !snd.FastRecovery.Active {
+		snd.cc.HandleLossDetected()
+		snd.enterRecovery()
+		return true
+	}
+	if currentEpochLost {
+		// Reno uses the pre-mark flight estimate and CUBIC its current cwnd.
+		// Invoke real CC before SetPipe removes this newly lost flight.
+		oldCwnd := snd.SndCwnd
+		snd.cc.HandleLossDetected()
+		snd.SndCwnd = min(oldCwnd, snd.Ssthresh)
+		snd.FastRecovery.MaxCwnd = min(snd.FastRecovery.MaxCwnd, snd.SndCwnd)
+		// This response covers the current flight, not only the older
+		// recovery prefix. Its completion must not re-charge pending loss.
+		snd.FastRecovery.Last = snd.SndNxt - 1
+		rc.advanceLossEpoch()
+	}
+	return false
 }
 
 // update will update the RACK related fields when an ACK has been received.
@@ -375,9 +426,8 @@ func (rc *rackControl) exitRecovery() {
 // See: https://tools.ietf.org/html/draft-ietf-tcpm-rack-08#section-7.2 Step 5.
 //
 // +checklocks:rc.snd.ep.mu
-func (rc *rackControl) detectLoss(rcvTime tcpip.MonotonicTime) int {
+func (rc *rackControl) detectLoss(rcvTime tcpip.MonotonicTime) (numLost int, currentEpochLost bool) {
 	var timeout time.Duration
-	numLost := 0
 	clockResolution := rc.snd.ep.stack.ClockResolution()
 	for seg := rc.snd.writeList.Front(); seg != nil && seg.xmitCount != 0; seg = seg.Next() {
 		if rc.snd.ep.scoreboard.IsSACKED(seg.sackBlock()) {
@@ -397,6 +447,9 @@ func (rc *rackControl) detectLoss(rcvTime tcpip.MonotonicTime) int {
 			// zero during recovery.
 			timeRemaining := seg.xmitTime.Sub(rcvTime) + rc.RTT + rc.ReoWnd + clockResolution
 			if timeRemaining < 0 || (timeRemaining == 0 && clockResolution == 0) {
+				if !seg.lost && seg.lossEpoch == rc.lossEpoch {
+					currentEpochLost = true
+				}
 				seg.lost = true
 				numLost++
 			} else {
@@ -418,7 +471,7 @@ func (rc *rackControl) detectLoss(rcvTime tcpip.MonotonicTime) int {
 	if timeout != 0 && !rc.snd.reorderTimer.enabled() {
 		rc.snd.reorderTimer.enable(timeout)
 	}
-	return numLost
+	return numLost, currentEpochLost
 }
 
 // reorderTimerExpired will retransmit the segments which have not been acked
@@ -441,17 +494,12 @@ func (rc *rackControl) reorderTimerExpired() tcpip.Error {
 	// retransmits and recovery on a path with little or no real loss
 	// (gvisor#9707/#9778). detectLoss arms the timer from rcvdTime-derived
 	// values, so evaluating it at the timer target keeps the two consistent.
-	numLost := rc.detectLoss(rc.snd.reorderTimer.target)
+	numLost, currentEpochLost := rc.detectLoss(rc.snd.reorderTimer.target)
 	if numLost == 0 {
 		return nil
 	}
 
-	fastRetransmit := false
-	if !rc.snd.FastRecovery.Active {
-		rc.snd.cc.HandleLossDetected()
-		rc.snd.enterRecovery()
-		fastRetransmit = true
-	}
+	fastRetransmit := rc.handleLoss(numLost, currentEpochLost)
 
 	rc.DoRecovery(nil, fastRetransmit)
 	return nil
@@ -466,6 +514,11 @@ func (rc *rackControl) DoRecovery(_ *segment, fastRetransmit bool) {
 	if fastRetransmit {
 		snd.resendSegment()
 	}
+	// Loss may have just been marked by either ACK processing or the
+	// reorder timer while recovery was already active. Recompute after
+	// those marks (and the optional actual first retransmission), before
+	// deciding whether congestion-window space is available.
+	snd.SetPipe()
 
 	var dataSent bool
 	// Iterate the writeList and retransmit the segments which are marked

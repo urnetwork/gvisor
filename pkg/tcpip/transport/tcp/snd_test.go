@@ -43,9 +43,17 @@ type ptoTestContext struct {
 
 func newPTOTestContext(t *testing.T) *ptoTestContext {
 	t.Helper()
+	return privateRACKSafetyContextWithResolution(t, 0)
+}
+
+// The existing fixture keeps its zero-resolution default. Only the private
+// forced-first control requests an explicit, supported quantized clock model.
+func privateRACKSafetyContextWithResolution(t *testing.T, resolution time.Duration) *ptoTestContext {
+	t.Helper()
 	clock := faketime.NewManualClock()
 	s := stack.New(stack.Options{
 		Clock:              clock,
+		ClockResolution:    resolution,
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{NewProtocol},
 	})

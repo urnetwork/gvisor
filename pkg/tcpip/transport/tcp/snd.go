@@ -633,6 +633,9 @@ func (s *sender) retransmitTimerExpired() tcpip.Error {
 
 	s.state = tcpip.RTORecovery
 	s.cc.HandleRTOExpired()
+	if s.ep.SACKPermitted && s.ep.tcpRecovery&tcpip.TCPRACKLossDetection != 0 {
+		s.rc.advanceLossEpoch()
+	}
 
 	// Mark the next segment to be sent as the first unacknowledged one and
 	// start sending again. Set the number of outstanding packets to 0 so
@@ -704,6 +707,9 @@ func (s *sender) splitSeg(seg *segment, size int) {
 	}
 	// Split this segment up.
 	nSeg := seg.clone()
+	// Splitting a lost GSO segment does not put its unsent remainder back
+	// in flight. sendSegment clears lost only for the part actually sent.
+	nSeg.lost = seg.lost
 	nSeg.pkt.Data().TrimFront(size)
 	nSeg.sequenceNumber.UpdateForward(seqnum.Size(size))
 	s.writeList.InsertAfter(seg, nSeg)
@@ -1148,6 +1154,9 @@ func (s *sender) enterRecovery() {
 	s.retransmitTS = 0
 
 	s.FastRecovery.Active = true
+	if s.ep.SACKPermitted && s.ep.tcpRecovery&tcpip.TCPRACKLossDetection != 0 {
+		s.rc.advanceLossEpoch()
+	}
 	// Save state to reflect we're now in fast recovery.
 	//
 	// See : https://tools.ietf.org/html/rfc5681#section-3.2 Step 3.
@@ -1234,6 +1243,16 @@ func (s *sender) SetPipe() {
 				break
 			}
 			if s.ep.scoreboard.IsSACKED(sb) {
+				continue
+			}
+			if s.ep.tcpRecovery&tcpip.TCPRACKLossDetection != 0 {
+				// RACK's time-based loss decision, not RFC6675's SACK-byte
+				// threshold, decides whether the latest transmission is in
+				// flight. Actual retransmission clears lost, so count it once
+				// without also applying the RFC6675 HighRxt rule below.
+				if !s1.lost {
+					pipe++
+				}
 				continue
 			}
 
@@ -1781,12 +1800,8 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
 		// After the reorder window is calculated, detect any loss by checking
 		// if the time elapsed after the segments are sent is greater than the
 		// reorder window.
-		if numLost := s.rc.detectLoss(rcvdSeg.rcvdTime); numLost > 0 && !s.FastRecovery.Active {
-			// If any segment is marked as lost by
-			// RACK, enter recovery and retransmit
-			// the lost segments.
-			s.cc.HandleLossDetected()
-			s.enterRecovery()
+		numLost, currentEpochLost := s.rc.detectLoss(rcvdSeg.rcvdTime)
+		if s.rc.handleLoss(numLost, currentEpochLost) {
 			fastRetransmit = true
 		}
 
@@ -1827,6 +1842,9 @@ func (s *sender) sendSegment(seg *segment) tcpip.Error {
 	seg.xmitTime = s.ep.stack.Clock().NowMonotonic()
 	seg.xmitCount++
 	seg.lost = false
+	if s.ep.SACKPermitted && s.ep.tcpRecovery&tcpip.TCPRACKLossDetection != 0 {
+		seg.lossEpoch = s.rc.lossEpoch
+	}
 
 	err := s.sendSegmentFromPacketBuffer(seg.pkt, seg.flags, seg.sequenceNumber)
 

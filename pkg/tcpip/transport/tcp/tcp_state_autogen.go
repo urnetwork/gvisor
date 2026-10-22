@@ -745,6 +745,7 @@ func (rc *rackControl) StateFields() []string {
 		"tlpRxtOut",
 		"tlpHighRxt",
 		"snd",
+		"lossEpoch",
 	}
 }
 
@@ -759,6 +760,7 @@ func (rc *rackControl) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(3, &rc.tlpRxtOut)
 	stateSinkObject.Save(4, &rc.tlpHighRxt)
 	stateSinkObject.Save(5, &rc.snd)
+	stateSinkObject.Save(6, &rc.lossEpoch)
 }
 
 func (rc *rackControl) afterLoad(context.Context) {}
@@ -771,6 +773,7 @@ func (rc *rackControl) StateLoad(ctx context.Context, stateSourceObject state.So
 	stateSourceObject.Load(3, &rc.tlpRxtOut)
 	stateSourceObject.Load(4, &rc.tlpHighRxt)
 	stateSourceObject.Load(5, &rc.snd)
+	stateSourceObject.Load(6, &rc.lossEpoch)
 }
 
 func (r *receiver) StateTypeName() string {
@@ -948,6 +951,7 @@ func (s *segment) StateFields() []string {
 		"acked",
 		"dataMemSize",
 		"lost",
+		"lossEpoch",
 	}
 }
 
@@ -978,6 +982,7 @@ func (s *segment) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(17, &s.acked)
 	stateSinkObject.Save(18, &s.dataMemSize)
 	stateSinkObject.Save(19, &s.lost)
+	stateSinkObject.Save(20, &s.lossEpoch)
 }
 
 func (s *segment) afterLoad(context.Context) {}
@@ -1003,6 +1008,7 @@ func (s *segment) StateLoad(ctx context.Context, stateSourceObject state.Source)
 	stateSourceObject.Load(17, &s.acked)
 	stateSourceObject.Load(18, &s.dataMemSize)
 	stateSourceObject.Load(19, &s.lost)
+	stateSourceObject.Load(20, &s.lossEpoch)
 	stateSourceObject.LoadValue(12, new([]byte), func(y any) { s.loadOptions(ctx, y.([]byte)) })
 }
 
