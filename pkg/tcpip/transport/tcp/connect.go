@@ -641,6 +641,12 @@ func (h *handshake) retransmitHandlerLocked() tcpip.Error {
 	// the connection with another ACK or data (as ACKs are never
 	// retransmitted on their own).
 	if h.active || !h.acked || h.deferAccept != 0 && e.stack.Clock().NowMonotonic().Sub(h.startTime) > h.deferAccept {
+		synOpts := h.sendSYNOpts
+		if synOpts.TS {
+			// Each transmission needs its own timestamp so an echoed retry does
+			// not include the retransmission wait in the RTT sample.
+			synOpts.TSVal = e.tsValNow()
+		}
 		e.sendSynTCP(e.route, tcpFields{
 			id:        e.TransportEndpointInfo.ID,
 			ttl:       calculateTTL(e.route, e.ipv4TTL, e.ipv6HopLimit),
@@ -651,7 +657,7 @@ func (h *handshake) retransmitHandlerLocked() tcpip.Error {
 			rcvWnd:    h.rcvWnd,
 			df:        h.ep.pmtud == tcpip.PMTUDiscoveryWant || h.ep.pmtud == tcpip.PMTUDiscoveryDo || h.ep.pmtud == tcpip.PMTUDiscoveryProbe,
 			expOptVal: e.getExperimentOptionValue(e.route),
-		}, h.sendSYNOpts)
+		}, synOpts)
 		// If we have ever retransmitted the SYN-ACK or
 		// SYN segment, we should only measure RTT if
 		// TS option is present.
